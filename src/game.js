@@ -1,0 +1,2063 @@
+/* ============================================================
+   星织 · STARWEAVE
+   a small game about the lines between us
+   ------------------------------------------------------------
+   one thread. every star. never cross. never look back.
+   ============================================================ */
+(() => {
+'use strict';
+
+/* ---------- tiny utilities ---------- */
+const $  = (s, r = document) => r.querySelector(s);
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+const easeInOutCubic = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const easeOutQuint = t => 1 - Math.pow(1 - t, 5);
+const rand = (a = 0, b = 1) => a + Math.random() * (b - a);
+const dist2 = (ax, ay, bx, by) => (ax-bx)*(ax-bx) + (ay-by)*(ay-by);
+const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const CN = ['零','一','二','三','四','五','六','七','八','九'];
+function cnNum(n){
+  if (n < 10) return CN[n];
+  if (n < 20) return '十' + (n % 10 ? CN[n % 10] : '');
+  if (n < 100) {
+    const t = Math.floor(n / 10), o = n % 10;
+    return CN[t] + '十' + (o ? CN[o] : '');
+  }
+  return String(n);
+}
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+
+/* ---------- the six nights ---------- */
+const LEVELS = [
+  {
+    num:'壹', zh:'初弦', en:'FIRST LIGHT', root:50,
+    poem:'第一根线，总是从孤独开始。',
+    stars:[[.16,.60],[.27,.47],[.39,.41],[.50,.49],[.56,.60],[.69,.62],[.82,.52]],
+    order:[0,1,2,3,4,5,6]
+  },
+  {
+    num:'贰', zh:'潮汐', en:'TIDE', root:45,
+    poem:'有些光，要等潮水退去才看得见。',
+    stars:[[.12,.54],[.21,.65],[.33,.60],[.39,.46],[.49,.40],[.58,.47],[.63,.61],[.76,.66],[.68,.44]],
+    order:[0,1,2,3,4,5,6,7,8]
+  },
+  {
+    num:'叁', zh:'回廊', en:'THE CORRIDOR', root:43,
+    poem:'我们绕了很远，才回到彼此身边。',
+    stars:[[.15,.34],[.26,.24],[.40,.22],[.55,.28],[.68,.38],[.79,.50],[.68,.62],[.53,.66],[.42,.53],[.35,.64]],
+    order:[0,1,2,3,4,5,6,7,8,9]
+  },
+  {
+    num:'肆', zh:'鹿鸣', en:'DEER SONG', root:47,
+    poem:'听，星星踩过树梢的声音。',
+    stars:[[.12,.72],[.20,.58],[.29,.64],[.36,.50],[.45,.56],[.53,.42],[.61,.49],[.69,.36],[.77,.46],[.85,.38],[.80,.58],[.68,.68]],
+    order:[0,1,2,3,4,5,6,7,8,9,10,11]
+  },
+  {
+    num:'伍', zh:'余烬', en:'EMBER', root:45,
+    poem:'燃尽的，才配叫作光。',
+    stars:[[.50,.78],[.42,.68],[.52,.62],[.44,.52],[.55,.46],[.47,.36],[.57,.28],[.68,.22],[.77,.30],[.68,.39],[.60,.48],[.70,.55],[.82,.62]],
+    order:[0,1,2,3,4,5,6,7,8,9,10,11,12]
+  },
+  {
+    num:'陆', zh:'归途', en:'HOMEWARD', root:50,
+    poem:'所有的远行，都是为了回到一个点。',
+    stars:[[.16,.60],[.20,.44],[.32,.32],[.46,.26],[.60,.30],[.72,.39],[.82,.52],[.78,.66],[.66,.75],[.52,.70],[.43,.60],[.50,.50],[.60,.55],[.53,.63]],
+    order:[0,1,2,3,4,5,6,7,8,9,10,11,12,13]
+  }
+];
+
+/* ---------- dom ---------- */
+const introEl   = $('#intro');
+const startBtn  = $('#startBtn');
+const hudEl     = $('#hud');
+const footerEl  = $('#footer');
+const hintEl    = $('#hint');
+const dotsEl    = $('#dots');
+const hudNum    = $('#hudNum');
+const hudName   = $('#hudName');
+const hudEn     = $('#hudEn');
+const toastEl   = $('#toast');
+const captionEl = $('#caption');
+const capEyebrow= $('#capEyebrow');
+const capSeal   = $('#capSeal');
+const capName   = $('#capName');
+const capEn     = $('#capEn');
+const capPoem   = $('#capPoem');
+const capPerfect= $('#capPerfect');
+const capHintEl = $('#caption .cap-hint');
+const endingEl  = $('#ending');
+const endSeal   = $('#endSeal');
+const endStats  = $('#endStats');
+const againBtn  = $('#againBtn');
+const cursorEl  = $('#cursor');
+const hintBtn   = $('#hintBtn');
+const undoBtn   = $('#undoBtn');
+const restartBtn= $('#restartBtn');
+const soundBtn  = $('#soundBtn');
+const bg = $('#bg'), fg = $('#fg');
+const bx = bg.getContext('2d'), fx = fg.getContext('2d');
+
+/* ---------- runtime ---------- */
+let W = 0, H = 0, DPR = 1;
+let stage = { x:0, y:0, w:1, h:1, cx:0, cy:0, s:1, mobile:false };
+let stars = [], path = [], pathBirths = [];
+let levelIndex = 0, level = LEVELS[0], session = 0;
+let state = 'intro';                 // intro | transition | playing | completed | ending
+let now = 0, lastFrame = 0, lastAction = 0;
+let levelAlpha = 0, levelAlphaTarget = 0;
+let introRingAlpha = 1;
+let view = { zoom:1, dy:0, tz:1, tdy:0 };
+let pointer = { x:0, y:0, inside:false, down:false, type:'mouse', smx:0, smy:0, overUI:false };
+let dragging = false, activePointer = null, lockUntil = 0, movedSinceDown = 0;
+let hoverIndex = -1;
+let hintIndex = -1, hintSince = 0, hintUntil = 0, hintAuto = false;
+let deadEnd = false;
+let usedHint = false, usedUndo = false, usedRestart = false;
+let completedAt = 0, autoAdvanceAt = 0, advancing = false, completion = null;
+let archives = [];
+let archiveFlight = null;
+let endingT0 = 0, endingProgress = 0;
+let flash = 0;
+let particles = [], pendingBursts = [];
+let bgStars = [], dust = [], shooting = [];
+let nebulaCanvas = null;
+let toastTimer = 0, lastToastAt = -99, nextShooting = 10 + Math.random() * 12;
+let nextAutoHint = 0;
+let debugMode = false;
+
+/* sprites */
+const SPR = {};
+function makeGlowSprite(rgb){
+  const c = document.createElement('canvas'); c.width = c.height = 96;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(48,48,0,48,48,48);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(.055, `rgba(${rgb},.96)`);
+  gr.addColorStop(.16, `rgba(${rgb},.42)`);
+  gr.addColorStop(.38, `rgba(${rgb},.10)`);
+  gr.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = gr; g.fillRect(0,0,96,96);
+  return c;
+}
+SPR.ivory = makeGlowSprite('255,242,219');
+SPR.gold  = makeGlowSprite('255,214,150');
+SPR.blue  = makeGlowSprite('193,217,255');
+SPR.rose  = makeGlowSprite('231,130,105');
+
+/* ============================================================
+   geometry / solver
+   ============================================================ */
+function orient(a,b,c){ return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]); }
+function onSeg(a,b,c){
+  return Math.min(a[0],b[0]) - 1e-9 <= c[0] && c[0] <= Math.max(a[0],b[0]) + 1e-9 &&
+         Math.min(a[1],b[1]) - 1e-9 <= c[1] && c[1] <= Math.max(a[1],b[1]) + 1e-9;
+}
+function samePt(a,b){ return Math.abs(a[0]-b[0]) < 1e-9 && Math.abs(a[1]-b[1]) < 1e-9; }
+function segInt(a,b,c,d){
+  if (samePt(a,c) || samePt(a,d) || samePt(b,c) || samePt(b,d)) return false;
+  const o1 = orient(a,b,c), o2 = orient(a,b,d), o3 = orient(c,d,a), o4 = orient(c,d,b);
+  const e = 1e-9;
+  if (((o1 > e && o2 < -e) || (o1 < -e && o2 > e)) &&
+      ((o3 > e && o4 < -e) || (o3 < -e && o4 > e))) return true;
+  if (Math.abs(o1) < e && onSeg(a,b,c)) return true;
+  if (Math.abs(o2) < e && onSeg(a,b,d)) return true;
+  if (Math.abs(o3) < e && onSeg(c,d,a)) return true;
+  if (Math.abs(o4) < e && onSeg(c,d,b)) return true;
+  return false;
+}
+function pathCrosses(pts, prefix){
+  for (let i = 0; i < prefix.length - 1; i++){
+    for (let j = i + 2; j < prefix.length - 1; j++){
+      if (segInt(pts[prefix[i]], pts[prefix[i+1]], pts[prefix[j]], pts[prefix[j+1]])) return true;
+    }
+  }
+  return false;
+}
+function findSolution(pts, prefix, budget = 140000){
+  const n = pts.length;
+  const used = new Uint8Array(n);
+  const startPath = prefix.slice();
+  for (const i of startPath) used[i] = 1;
+  const segs = [];
+  for (let k = 0; k < startPath.length - 1; k++) segs.push([startPath[k], startPath[k+1]]);
+  const route = startPath.slice();
+  let calls = 0;
+  const e = 1e-9;
+
+  function dfs(){
+    if (++calls > budget) return false;
+    if (route.length === n) return true;
+    const lastI = route[route.length - 1];
+    const last = pts[lastI];
+    const cand = [];
+    for (let i = 0; i < n; i++){
+      if (used[i]) continue;
+      const d = (pts[i][0]-last[0])*(pts[i][0]-last[0]) + (pts[i][1]-last[1])*(pts[i][1]-last[1]);
+      cand.push([d, i]);
+    }
+    cand.sort((a,b) => a[0] - b[0]);
+    for (const [, i] of cand){
+      let bad = false;
+      for (const [s1,s2] of segs){
+        if (segInt(last, pts[i], pts[s1], pts[s2])) { bad = true; break; }
+      }
+      if (bad) continue;
+      used[i] = 1; route.push(i); segs.push([lastI, i]);
+      if (dfs()) return true;
+      segs.pop(); route.pop(); used[i] = 0;
+      if (calls > budget) return false;
+    }
+    return false;
+  }
+
+  if (prefix.length === 0){
+    for (let s = 0; s < n; s++){
+      used[s] = 1; route.push(s);
+      if (dfs()) return route.slice();
+      route.pop(); used[s] = 0;
+      if (calls > budget) return null;
+    }
+    return null;
+  }
+  return dfs() ? route.slice() : null;
+}
+function isCanonicalPrefix(p){
+  if (p.length >= level.order.length) return false;
+  for (let i = 0; i < p.length; i++) if (p[i] !== level.order[i]) return false;
+  return true;
+}
+
+/* ============================================================
+   sound
+   ============================================================ */
+const Sound = {
+  ctx:null, master:null, dry:null, wet:null, bus:null, muted:false, ready:false, ambientOn:false,
+  init(){
+    if (this.ctx){
+      if (this.ctx.state === 'suspended') this.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      const ctx = this.ctx = new AC();
+      const master = this.master = ctx.createGain();
+      master.gain.value = .0001;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -20; comp.knee.value = 22;
+      comp.ratio.value = 4; comp.attack.value = .004; comp.release.value = .28;
+      master.connect(comp); comp.connect(ctx.destination);
+
+      const conv = ctx.createConvolver();
+      conv.buffer = this.impulse(3.0, 2.7);
+      const wet = this.wet = ctx.createGain(); wet.gain.value = .62;
+      const dry = this.dry = ctx.createGain(); dry.gain.value = .55;
+      conv.connect(wet); wet.connect(master);
+      dry.connect(master);
+
+      const bus = this.bus = ctx.createGain(); bus.gain.value = .9;
+      bus.connect(dry); bus.connect(conv);
+
+      this.ambient();
+      this.ready = true;
+      master.gain.setTargetAtTime(this.muted ? .0001 : .5, ctx.currentTime, .8);
+      if (ctx.state === 'suspended') ctx.resume();
+    } catch(e) { /* silence is golden */ }
+  },
+  impulse(dur, decay){
+    const rate = this.ctx.sampleRate, len = Math.floor(rate * dur);
+    const buf = this.ctx.createBuffer(2, len, rate);
+    for (let ch = 0; ch < 2; ch++){
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++){
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+      }
+    }
+    return buf;
+  },
+  bell(midi, vel = .18, dur = 2.6, when = 0, pan = null){
+    if (!this.ready || this.muted) return;
+    const ctx = this.ctx, t = ctx.currentTime + when;
+    const freq = midiToFreq(midi);
+    const p = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    if (p){ p.pan.value = pan == null ? rand(-.38, .38) : pan; p.connect(this.bus); }
+    const dest = p || this.bus;
+    const partials = [
+      [1,    1.00, 1.00],
+      [2.01, .34,  0.62],
+      [2.78, .15,  0.40],
+      [4.16, .055, 0.22],
+      [.5,   .10,  1.20]
+    ];
+    for (const [mul, amp, dscale] of partials){
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = freq * mul;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(.0003, vel * amp), t + .012);
+      g.gain.exponentialRampToValueAtTime(.0001, t + dur * dscale);
+      o.connect(g); g.connect(dest);
+      o.start(t); o.stop(t + dur * dscale + .08);
+    }
+  },
+  note(i){
+    const SEQ = [0,2,4,7,9,12,14,16,19,21,24,26,28,31,33];
+    const root = level.root;
+    const midi = root + SEQ[Math.min(i, SEQ.length - 1)];
+    this.bell(midi, .17, 2.7, 0, null);
+    if (i > 1 && i % 3 === 0) this.bell(midi + 12, .035, 1.6, .015, rand(-.6,.6));
+  },
+  complete(n, perfect){
+    const root = level.root;
+    const t = 0;
+    this.bell(root, .15, 4.2, t, 0);
+    this.bell(root + 12, .13, 4.0, t + .07, -.25);
+    this.bell(root + 19, .10, 3.6, t + .16, .3);
+    this.bell(root + 24, .085, 3.4, t + .26, -.1);
+    this.bell(root + 28, .05, 3.0, t + .40, .45);
+    this.bell(root + 31, .035, 2.6, t + .58, -.5);
+    if (perfect) this.bell(root + 36, .028, 3.2, t + 1.15, .55);
+  },
+  finale(){
+    if (!this.ready || this.muted) return;
+    const root = level.root;
+    const t = 0;
+    this.bell(root - 12, .16, 7.5, t, 0);
+    this.bell(root, .14, 6.5, t + .3, -.3);
+    this.bell(root + 12, .10, 6.0, t + .8, .3);
+    this.bell(root + 19, .075, 5.5, t + 1.4, -.2);
+    this.bell(root + 24, .055, 5.0, t + 2.0, .4);
+    this.bell(root + 31, .03, 4.5, t + 2.8, 0);
+  },
+  reject(){
+    if (!this.ready || this.muted) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+    o.type = 'triangle'; o.frequency.setValueAtTime(132, t);
+    o.frequency.exponentialRampToValueAtTime(86, t + .20);
+    f.type = 'lowpass'; f.frequency.value = 340;
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(.075, t + .012);
+    g.gain.exponentialRampToValueAtTime(.0001, t + .32);
+    o.connect(f); f.connect(g); g.connect(this.bus);
+    o.start(t); o.stop(t + .36);
+  },
+  dead(){
+    if (!this.ready || this.muted) return;
+    this.bell(level.root - 5, .05, 1.8, 0, -.3);
+  },
+  hint(){
+    if (!this.ready || this.muted) return;
+    const notes = [level.root + 24, level.root + 28];
+    this.bell(notes[0], .055, 1.8, 0, -.35);
+    this.bell(notes[1], .04, 1.6, .09, .35);
+  },
+  undo(){
+    if (!this.ready || this.muted) return;
+    this.bell(level.root + 7, .035, 1.2, 0, .2);
+  },
+  tick(){
+    if (!this.ready || this.muted) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = 1560;
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(.012, t + .004);
+    g.gain.exponentialRampToValueAtTime(.0001, t + .09);
+    o.connect(g); g.connect(this.bus); o.start(t); o.stop(t + .1);
+  },
+  page(){
+    if (!this.ready || this.muted) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const len = Math.floor(ctx.sampleRate * .45);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/len, 2);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 900; f.Q.value = .7;
+    const g = ctx.createGain(); g.gain.value = .025;
+    src.connect(f); f.connect(g); g.connect(this.bus); src.start(t);
+  },
+  ambient(){
+    if (this.ambientOn) return;
+    this.ambientOn = true;
+    const ctx = this.ctx;
+    const g = ctx.createGain(); g.gain.value = .032;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass';
+    filt.frequency.value = 230; filt.Q.value = .7;
+    filt.connect(g); g.connect(this.dry);
+    const o1 = ctx.createOscillator(); o1.type = 'sine'; o1.frequency.value = 55;
+    const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = 82.41;
+    const o3 = ctx.createOscillator(); o3.type = 'triangle'; o3.frequency.value = 110; o3.detune.value = 3;
+    const g3 = ctx.createGain(); g3.gain.value = .16;
+    o1.connect(filt); o2.connect(filt); o3.connect(g3); g3.connect(filt);
+    o1.start(); o2.start(); o3.start();
+    const lfo = ctx.createOscillator(); lfo.frequency.value = .047;
+    const lfoG = ctx.createGain(); lfoG.gain.value = 75;
+    lfo.connect(lfoG); lfoG.connect(filt.frequency); lfo.start();
+
+    const len = Math.floor(ctx.sampleRate * 3);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random()*2-1) * .6;
+    const noise = ctx.createBufferSource(); noise.buffer = buf; noise.loop = true;
+    const nf = ctx.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 460; nf.Q.value = .5;
+    const ng = ctx.createGain(); ng.gain.value = .011;
+    noise.connect(nf); nf.connect(ng); ng.connect(this.dry); noise.start();
+  },
+  toggle(){
+    this.init();
+    if (!this.ready) return;
+    this.muted = !this.muted;
+    this.master.gain.setTargetAtTime(this.muted ? .0001 : .5, this.ctx.currentTime, .25);
+    soundBtn.classList.toggle('muted', this.muted);
+    $('.ic-sound', soundBtn).style.display = this.muted ? 'none' : '';
+    $('.ic-mute', soundBtn).style.display = this.muted ? '' : 'none';
+    soundBtn.setAttribute('aria-label', this.muted ? '打开声音' : '关闭声音');
+    if (!this.muted) this.tick();
+  }
+};
+
+/* ============================================================
+   layout / background
+   ============================================================ */
+function computeStage(){
+  const portrait = W < 720 || W / H < .92;
+  const padTop = portrait ? H * .155 : H * .150;
+  const padBottom = portrait ? H * .140 : H * .130;
+  const padSide = portrait ? W * .075 : Math.max(W * .155, 70);
+  const availW = W - padSide * 2;
+  const availH = H - padTop - padBottom;
+  const aspect = portrait ? .82 : 1.48;
+  let sw = Math.min(availW, availH * aspect);
+  let sh = sw / aspect;
+  if (sh > availH){ sh = availH; sw = sh * aspect; }
+  stage = {
+    x:(W - sw) / 2,
+    y:padTop + (availH - sh) / 2,
+    w:sw, h:sh,
+    cx:W / 2,
+    cy:padTop + availH / 2,
+    s:Math.min(sw, sh),
+    mobile:portrait
+  };
+}
+
+function makeBgStars(){
+  const rng = mulberry32(0x51A7 + Math.round(W) * 3 + Math.round(H) * 7);
+  const count = REDUCED ? 90 : clamp(Math.round(W * H / 6200), 90, 280);
+  bgStars = [];
+  for (let i = 0; i < count; i++){
+    const z = .15 + Math.pow(rng(), 1.5) * .85;
+    const r = .30 + Math.pow(rng(), 2.4) * (W > 800 ? 1.8 : 1.15);
+    const tintRoll = rng();
+    bgStars.push({
+      x:rng() * W, y:rng() * H, r, z,
+      a:.16 + Math.pow(rng(), 1.5) * .62,
+      p:rng() * TAU, sp:.25 + rng() * 1.15,
+      tint:tintRoll < .14 ? 'gold' : (tintRoll < .30 ? 'blue' : 'ivory'),
+      cross:rng() < .035
+    });
+  }
+  // a handful of quiet anchors to compose the sky
+  const anchors = [[.14,.19],[.83,.14],[.73,.30],[.27,.11],[.92,.43],[.07,.71],[.95,.79],[.54,.07]];
+  for (const [nx,ny] of anchors){
+    bgStars.push({
+      x:nx*W, y:ny*H, r:1.5 + rng()*1.2, z:.7 + rng()*.3,
+      a:.55 + rng()*.25, p:rng()*TAU, sp:.2+rng()*.5,
+      tint:rng()<.3?'gold':'ivory', cross:true
+    });
+  }
+}
+
+function makeDust(){
+  const n = REDUCED ? 0 : clamp(Math.round(W*H/26000), 18, 54);
+  dust = [];
+  for (let i = 0; i < n; i++){
+    dust.push({
+      x:rand(0,W), y:rand(0,H),
+      r:rand(.35,1.35), a:rand(.04,.16),
+      vx:rand(-2.2,2.2), vy:rand(-7,-2.2),
+      p:rand(0,TAU), sp:rand(.4,1.4)
+    });
+  }
+}
+
+function makeNebula(){
+  const scale = .42;
+  const cw = Math.max(480, Math.round(W * scale));
+  const ch = Math.max(360, Math.round(H * scale));
+  const c = document.createElement('canvas');
+  c.width = cw; c.height = ch;
+  const g = c.getContext('2d');
+  g.clearRect(0,0,cw,ch);
+  g.globalCompositeOperation = 'lighter';
+  const rng = mulberry32(7013 + Math.round(W) + Math.round(H) * 5);
+  const palette = [
+    [26, 52, 98],
+    [50, 34, 88],
+    [12, 46, 62],
+    [76, 42, 47],
+    [19, 36, 72],
+    [42, 28, 64]
+  ];
+  const blobs = [
+    [.24,.25,.46,.42],
+    [.74,.22,.42,.38],
+    [.52,.55,.48,.40],
+    [.88,.66,.34,.34],
+    [.12,.72,.36,.32],
+    [.42,.86,.44,.28],
+    [.64,.44,.30,.26],
+    [.30,.48,.26,.22]
+  ];
+  for (let i = 0; i < blobs.length; i++){
+    const [nx,ny,rx,ry] = blobs[i];
+    const col = palette[i % palette.length];
+    const x = nx*cw, y = ny*ch, r = Math.max(rx*cw, ry*ch);
+    g.save();
+    g.translate(x,y); g.scale(rx*cw/r, ry*ch/r);
+    const gr = g.createRadialGradient(0,0,0,0,0,r);
+    gr.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${.22 + rng()*.10})`);
+    gr.addColorStop(.45, `rgba(${col[0]},${col[1]},${col[2]},${.08 + rng()*.04})`);
+    gr.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
+    g.fillStyle = gr;
+    g.beginPath(); g.arc(0,0,r,0,TAU); g.fill();
+    g.restore();
+  }
+  nebulaCanvas = c;
+}
+
+function resize(){
+  W = window.innerWidth;
+  H = window.innerHeight;
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  for (const c of [bg, fg]){
+    c.width = Math.max(1, Math.round(W * DPR));
+    c.height = Math.max(1, Math.round(H * DPR));
+    c.style.width = W + 'px';
+    c.style.height = H + 'px';
+  }
+  bx.setTransform(DPR,0,0,DPR,0,0);
+  fx.setTransform(DPR,0,0,DPR,0,0);
+  computeStage();
+  makeBgStars();
+  makeDust();
+  makeNebula();
+  updateStarPositions();
+  if (archives.length && state === 'ending') endStats.textContent = statsText();
+}
+
+/* ============================================================
+   level lifecycle
+   ============================================================ */
+function makeStars(){
+  const rng = mulberry32(0xA17 + levelIndex * 193);
+  stars = level.stars.map(([nx,ny], i) => {
+    const major = i === level.order[0] || i === level.order[level.order.length-1] || rng() < .12;
+    const radFactor = (.78 + rng()*.50) * (major ? 1.30 : 1);
+    return {
+      i, nx, ny, pt:[nx,ny], x:0, y:0,
+      r:3, radFactor,
+      major,
+      phase:rng()*TAU,
+      visited:false, order:-1,
+      birth:now + .28 + i*.062,
+      pulse:0, reject:0, hover:0, dead:false
+    };
+  });
+  updateStarPositions();
+}
+function updateStarPositions(){
+  const base = clamp(stage.s * (stage.mobile ? .0074 : .0068), 1.8, 5.0);
+  if (stage.mobile){
+    // on a tall screen the constellation turns on its side, to use the night
+    const ext = stage.s * 1.26;
+    for (const s of stars){
+      s.x = stage.cx + (s.ny - .5) * ext;
+      s.y = stage.cy + (s.nx - .5) * ext;
+      s.dx = (s.x - stage.x) / Math.max(1, stage.w);
+      s.dy = (s.y - stage.y) / Math.max(1, stage.h);
+      s.r = base * s.radFactor;
+    }
+  } else {
+    for (const s of stars){
+      s.x = stage.x + s.nx * stage.w;
+      s.y = stage.y + s.ny * stage.h;
+      s.dx = s.nx;
+      s.dy = s.ny;
+      s.r = base * s.radFactor;
+    }
+  }
+}
+function loadLevel(i){
+  session++;
+  levelIndex = i;
+  level = LEVELS[i];
+  path = [];
+  pathBirths = [];
+  hoverIndex = -1;
+  hintIndex = -1;
+  deadEnd = false;
+  dragging = false;
+  activePointer = null;
+  usedHint = usedUndo = usedRestart = false;
+  completion = null;
+  archiveFlight = null;
+  advancing = false;
+  autoAdvanceAt = 0;
+  completedAt = 0;
+  particles = [];
+  pendingBursts = [];
+  flash = 0;
+  if (!now) now = performance.now() / 1000;
+  makeStars();
+  levelAlpha = 0;
+  levelAlphaTarget = 1;
+  view = { zoom:1, dy:0, tz:1, tdy:0 };
+  lastAction = now;
+  nextAutoHint = now + 27;
+  captionEl.classList.remove('show');
+  hudEl.classList.remove('dim');
+  footerEl.classList.remove('fade');
+  updateHUD();
+  setHint(i === 0 ? '按住一颗星，画下第一根线' : '按住一颗星，开始今晚的连线');
+  undoBtn.disabled = true;
+  restartBtn.disabled = false;
+}
+function updateHUD(){
+  hudNum.innerHTML = level.num + '<span class="of">/ ' + LEVELS[LEVELS.length-1].num + '</span>';
+  hudName.textContent = level.zh;
+  hudEn.textContent = level.en;
+  dotsEl.innerHTML = stars.map(() => '<i></i>').join('');
+  updateDots();
+}
+function updateDots(){
+  const kids = dotsEl.children;
+  for (let i = 0; i < kids.length && i < stars.length; i++){
+    kids[i].classList.toggle('on', stars[i].visited);
+  }
+  undoBtn.disabled = !(state === 'playing' && path.length > 0);
+}
+function setHint(text, warn = false){
+  hintEl.textContent = text;
+  hintEl.classList.toggle('warn', warn);
+}
+function toast(msg){
+  if (now - lastToastAt < .9) return;
+  lastToastAt = now;
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2000);
+}
+
+/* ============================================================
+   starting / paths / input
+   ============================================================ */
+function startGame(){
+  if (state !== 'intro') return;
+  Sound.init();
+  Sound.tick();
+  state = 'transition';
+  introEl.classList.add('hide');
+  introEl.setAttribute('aria-hidden','true');
+  setTimeout(() => { if (state !== 'intro') introEl.style.display = 'none'; }, 1400);
+  loadLevel(0);
+  view = { zoom:1, dy:0, tz:1, tdy:0 };
+  const s = session;
+  setTimeout(() => {
+    if (session !== s || state !== 'transition') return;
+    state = 'playing';
+    hudEl.classList.add('show');
+    footerEl.classList.add('show');
+    lastAction = now;
+    Sound.bell(level.root - 12, .13, 5.2, 0, 0);
+  }, 760);
+}
+
+function resetPathVisuals(){
+  for (const s of stars){
+    s.visited = false; s.order = -1; s.pulse = 0; s.dead = false; s.reject = 0;
+  }
+  path = [];
+  pathBirths = [];
+  updateDots();
+}
+
+function beginPath(i){
+  if (state !== 'playing') return;
+  const s = stars[i];
+  path = [i];
+  pathBirths = [];
+  s.visited = true;
+  s.order = 0;
+  s.pulse = 1;
+  s.reject = 0;
+  hintIndex = -1;
+  deadEnd = false;
+  lastAction = now;
+  Sound.note(0);
+  spawnBurst(s.x, s.y, 'gold', 12, .7);
+  setHint('继续 · 别回头');
+  updateDots();
+}
+
+function undoPath(){
+  if (state !== 'playing' || !path.length) return;
+  const idx = path.pop();
+  pathBirths.pop();
+  const s = stars[idx];
+  s.visited = false;
+  s.order = -1;
+  s.pulse = 0;
+  s.dead = false;
+  usedUndo = true;
+  deadEnd = false;
+  hintIndex = -1;
+  lastAction = now;
+  Sound.undo();
+  spawnBurst(s.x, s.y, 'ivory', 7, .45);
+  updateDots();
+  if (!path.length){
+    setHint(levelIndex === 0 ? '按住一颗星，画下第一根线' : '按住一颗星，开始今晚的连线');
+    hintIndex = -1;
+  } else {
+    setHint('从发光的星辰继续');
+  }
+}
+
+function restartLevel(){
+  if (state !== 'playing') return;
+  usedRestart = true;
+  resetPathVisuals();
+  deadEnd = false;
+  hintIndex = -1;
+  usedHint = usedUndo = false;
+  lastAction = now;
+  for (const s of stars) s.pulseAt = now;
+  Sound.page();
+  setHint(levelIndex === 0 ? '按住一颗星，画下第一根线' : '按住一颗星，开始今晚的连线');
+}
+
+function tryConnect(s){
+  if (state !== 'playing' || !path.length) return false;
+  const lastI = path[path.length - 1];
+  if (s.i === lastI || s.visited) return false;
+  const last = stars[lastI];
+  // crossing check against all committed segments except the last one
+  for (let k = 0; k < path.length - 2; k++){
+    if (segInt(last.pt, s.pt, stars[path[k]].pt, stars[path[k+1]].pt)){
+      s.reject = 1;
+      s.pulse = 0;
+      if (now - (s.lastReject || -9) > .55){
+        s.lastReject = now;
+        Sound.reject();
+        toast('星轨不可交叠');
+        spawnBurst(s.x, s.y, 'rose', 6, .35);
+      }
+      return false;
+    }
+  }
+  const t = now;
+  s.visited = true;
+  s.order = path.length;
+  s.pulse = 1;
+  s.reject = 0;
+  path.push(s.i);
+  pathBirths.push(t);
+  hintIndex = -1;
+  deadEnd = false;
+  lastAction = now;
+  lockUntil = now + .055;
+  Sound.note(path.length - 1);
+  spawnBurst(s.x, s.y, 'gold', 13, .8);
+  // a little dust along the new thread
+  for (let i = 0; i < 5; i++){
+    const k = rand(.15,.9);
+    spawnParticle(lerp(last.x,s.x,k), lerp(last.y,s.y,k), 'gold', rand(-7,7), rand(-7,7), rand(.4,.9), rand(.5,1.2));
+  }
+  updateDots();
+  if (path.length === stars.length){
+    completePath();
+  } else {
+    setHint('继续 · 别回头');
+    checkDeadEnd();
+  }
+  return true;
+}
+
+function checkDeadEnd(){
+  if (path.length < 2 || path.length >= stars.length) return;
+  const snapshot = path.slice();
+  const token = snapshot.join(',');
+  const s = session;
+  setTimeout(() => {
+    if (state !== 'playing' || session !== s) return;
+    if (path.join(',') !== token) return;
+    const sol = findSolution(level.stars, snapshot, 110000);
+    if (state !== 'playing' || path.join(',') !== token) return;
+    if (!sol){
+      deadEnd = true;
+      setHint('此路不通 · 按 Z 回退', true);
+      Sound.dead();
+    } else {
+      deadEnd = false;
+      if (!dragging) setHint('继续 · 别回头');
+    }
+  }, 60);
+}
+
+function requestHint(){
+  if (state !== 'playing') return;
+  usedHint = true;
+  hintAuto = false;
+  lastAction = now;
+  let next = null;
+  if (!path.length){
+    next = level.order[0];
+  } else if (isCanonicalPrefix(path)){
+    next = level.order[path.length];
+  } else {
+    const sol = findSolution(level.stars, path, 130000);
+    if (sol && sol.length > path.length) next = sol[path.length];
+  }
+  if (next == null){
+    deadEnd = true;
+    hintIndex = -1;
+    setHint('此路不通 · 按 Z 回退', true);
+    Sound.reject();
+    toast('这一笔，已经无路可走');
+    return;
+  }
+  hintIndex = next;
+  hintSince = now;
+  hintUntil = now + 4.8;
+  nextAutoHint = now + 28;
+  Sound.hint();
+  if (!path.length) setHint('从这里开始');
+  else setHint('跟着微光，继续');
+}
+
+function pulseAutoHint(){
+  if (state !== 'playing' || dragging) return;
+  if (!path.length){
+    hintIndex = level.order[0];
+    hintSince = now; hintUntil = now + 4.0; hintAuto = true;
+  } else {
+    const sol = findSolution(level.stars, path, 90000);
+    if (sol && sol.length > path.length){
+      hintIndex = sol[path.length];
+      hintSince = now; hintUntil = now + 4.0; hintAuto = true;
+    }
+  }
+  nextAutoHint = now + 26;
+}
+
+/* ---------- pointer ---------- */
+function starAt(x, y){
+  let best = null, bestD = Infinity;
+  const hit = clamp(stage.s * .060, 30, 44);
+  for (const s of stars){
+    if (now < s.birth + .05) continue;
+    const d = dist2(x, y, s.x, s.y);
+    if (d < hit*hit && d < bestD){ best = s; bestD = d; }
+  }
+  return best;
+}
+function setPointer(e){
+  pointer.x = e.clientX;
+  pointer.y = e.clientY;
+  pointer.inside = true;
+  pointer.type = e.pointerType || 'mouse';
+}
+function onPointerDown(e){
+  if (e.button === 2){ e.preventDefault(); undoPath(); return; }
+  if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+  if (e.target && e.target.closest && e.target.closest('button')) return;
+  Sound.init();
+  setPointer(e);
+  pointer.down = true;
+  updateCursor(true);
+  if (state === 'completed'){
+    if (now - completedAt > 1.05) advance();
+    return;
+  }
+  if (state !== 'playing') return;
+  const s = starAt(pointer.x, pointer.y);
+  if (!s) return;
+  activePointer = e.pointerId;
+  movedSinceDown = 0;
+  if (path.length){
+    const lastI = path[path.length - 1];
+    if (s.i === lastI){
+      dragging = true;
+      tryCapture(e);
+    } else if (s.visited){
+      if (s.i === path[path.length - 2]){
+        undoPath();
+        dragging = true;
+        tryCapture(e);
+      } else {
+        s.reject = 1;
+        Sound.reject();
+        toast('星不可重访');
+      }
+    } else {
+      const last = stars[lastI];
+      last.pulse = Math.max(last.pulse, .55);
+      toast('从发光的星辰继续');
+    }
+  } else {
+    beginPath(s.i);
+    dragging = true;
+    tryCapture(e);
+  }
+}
+function tryCapture(e){
+  try { fg.setPointerCapture(e.pointerId); } catch(err){}
+}
+function onPointerMove(e){
+  setPointer(e);
+  pointer.overUI = !!(e.target && e.target.closest && e.target.closest('button'));
+  if (state === 'playing'){
+    const s = starAt(pointer.x, pointer.y);
+    hoverIndex = s ? s.i : -1;
+    if (dragging && path.length){
+      if (!s || s.i === path[path.length-1] || s.visited) return;
+      if (now < lockUntil) return;
+      tryConnect(s);
+    }
+  }
+  updateCursor();
+}
+function onPointerUp(e){
+  if (state === 'playing' && dragging && path.length){
+    const s = starAt(pointer.x, pointer.y);
+    if (s && s.i !== path[path.length-1] && !s.visited) tryConnect(s);
+  }
+  pointer.down = false;
+  activePointer = null;
+  dragging = false;
+  if (state === 'playing'){
+    if (!path.length){
+      setHint(levelIndex === 0 ? '按住一颗星，画下第一根线' : '按住一颗星，开始今晚的连线');
+    } else if (path.length < stars.length){
+      if (deadEnd) setHint('此路不通 · 按 Z 回退', true);
+      else setHint(path.length === 1 ? '从这颗星继续，或按 Z 回退' : '从发光的星辰继续');
+    }
+  }
+  updateCursor();
+}
+function onPointerCancel(e){ onPointerUp(e); }
+function updateCursor(force){
+  if (pointer.type === 'touch'){ cursorEl.classList.remove('show'); return; }
+  cursorEl.style.transform = `translate3d(${pointer.x}px,${pointer.y}px,0) translate(-50%,-50%)`;
+  let overUI = pointer.overUI;
+  if (state === 'completed' || state === 'ending'){
+    try {
+      const el = document.elementFromPoint(pointer.x, pointer.y);
+      overUI = !!(el && el.closest && el.closest('button'));
+    } catch(err){ overUI = false; }
+    pointer.overUI = overUI;
+  }
+  const hot = (hoverIndex >= 0 && stars[hoverIndex] && !stars[hoverIndex].visited) || overUI;
+  cursorEl.classList.toggle('hot', hot);
+  cursorEl.classList.toggle('drag', dragging);
+  const canShow = pointer.inside && (
+    state === 'intro' || state === 'playing' || state === 'ending' ||
+    (state === 'completed' && overUI)
+  );
+  cursorEl.classList.toggle('show', canShow);
+}
+
+/* ============================================================
+   completion / transitions / ending
+   ============================================================ */
+function addArchive(perfect){
+  if (archives.some(a => a.level === levelIndex)) return null;
+  const entry = {
+    level: levelIndex,
+    pts: path.map(i => [stars[i].dx, stars[i].dy]),
+    t: now + 1.8,
+    perfect
+  };
+  archives.push(entry);
+  return entry;
+}
+function completePath(){
+  if (state !== 'playing' || path.length !== stars.length) return;
+  state = 'completed';
+  completedAt = now;
+  autoAdvanceAt = now + 9.4;
+  dragging = false;
+  hoverIndex = -1;
+  hintIndex = -1;
+  deadEnd = false;
+  const perfect = !usedHint && !usedUndo && !usedRestart;
+  const entry = addArchive(perfect);
+  if (entry){
+    let sx = 0, sy = 0;
+    for (const i of path){ sx += stars[i].x; sy += stars[i].y; }
+    sx /= path.length; sy /= path.length;
+    const slot = getSlot(levelIndex);
+    const t0 = now + .42;
+    const dur = 1.35;
+    archiveFlight = { x0:sx, y0:sy, x1:slot[0]*W, y1:slot[1]*H, t0, dur };
+    entry.t = t0 + dur - .08;
+  }
+  completion = { t0:now + .12, dur:1.65 };
+  view.tz = .90;
+  view.tdy = -H * .045;
+  flash = 1;
+  hudEl.classList.add('dim');
+  footerEl.classList.add('fade');
+  Sound.complete(path.length, perfect);
+  for (const s of stars){
+    s.pulseAt = now + .28 + s.order * .055;
+    s.pulse = 1;
+  }
+  pendingBursts.push({ at:now + .25, x:stage.cx, y:stage.cy, n:0, color:'gold', power:1, big:true });
+  stars.forEach((s, k) => {
+    pendingBursts.push({ at:now + .30 + s.order * .055, x:s.x, y:s.y, n:14, color:'gold', power:.9 });
+  });
+  capEyebrow.textContent = `第 ${level.num} 夜 · 星图已成`;
+  capSeal.textContent = level.num;
+  capName.textContent = level.zh;
+  capEn.textContent = level.en;
+  capPoem.textContent = level.poem;
+  capPerfect.textContent = perfect ? '一 气 呵 成' : '';
+  capHintEl.textContent = levelIndex >= LEVELS.length - 1 ? '轻 触 · 收 卷' : '轻 触 · 继 续';
+  const s = session;
+  setTimeout(() => {
+    if (state === 'completed' && session === s) captionEl.classList.add('show');
+  }, 980);
+}
+function advance(){
+  if (state !== 'completed' || advancing) return;
+  if (now - completedAt < 1.1) return;
+  advancing = true;
+  state = 'transition';
+  captionEl.classList.remove('show');
+  hudEl.classList.remove('show');
+  footerEl.classList.remove('show');
+  levelAlphaTarget = 0;
+  Sound.page();
+  const s = session;
+  const last = levelIndex >= LEVELS.length - 1;
+  setTimeout(() => {
+    if (session !== s) return;
+    if (last){
+      startEnding();
+    } else {
+      loadLevel(levelIndex + 1);
+      state = 'playing';
+      hudEl.classList.add('show');
+      footerEl.classList.add('show');
+      hudEl.classList.remove('dim');
+      footerEl.classList.remove('fade');
+      advancing = false;
+    }
+  }, 1000);
+}
+function startEnding(){
+  session++;
+  state = 'ending';
+  advancing = false;
+  autoAdvanceAt = 0;
+  endingT0 = now;
+  endingProgress = 0;
+  levelAlpha = 0;
+  levelAlphaTarget = 0;
+  captionEl.classList.remove('show');
+  hudEl.classList.remove('show','dim');
+  footerEl.classList.remove('show','fade');
+  hintIndex = -1;
+  archiveFlight = null;
+  view.tz = 1; view.tdy = 0;
+  archives.forEach(a => { a.t = Math.min(a.t, now - 1); });
+  Sound.finale();
+  if (!endStats.textContent) endStats.textContent = statsText();
+  const s = session;
+  setTimeout(() => {
+    if (state === 'ending' && session === s){
+      endStats.textContent = statsText();
+      endingEl.classList.add('show');
+      endSeal.classList.add('show');
+    }
+  }, 1450);
+}
+function statsText(){
+  const total = archives.reduce((a, e) => a + e.pts.length, 0);
+  return `${cnNum(archives.length)} 幅星图 · ${cnNum(total)} 颗星辰`;
+}
+function resetGame(){
+  if (state !== 'ending') return;
+  endingEl.classList.remove('show');
+  endSeal.classList.remove('show');
+  archives = [];
+  archiveFlight = null;
+  stars = [];
+  path = [];
+  pathBirths = [];
+  completion = null;
+  levelAlpha = 0;
+  state = 'transition';
+  advancing = false;
+  autoAdvanceAt = 0;
+  session++;
+  setTimeout(() => {
+    loadLevel(0);
+    state = 'playing';
+    levelAlphaTarget = 1;
+    hudEl.classList.add('show');
+    footerEl.classList.add('show');
+    hudEl.classList.remove('dim');
+    footerEl.classList.remove('fade');
+  }, 1050);
+}
+
+/* ============================================================
+   particles / fx
+   ============================================================ */
+function spawnParticle(x, y, color, vx, vy, life, size){
+  if (REDUCED && particles.length > 90) return;
+  particles.push({
+    x, y, vx, vy,
+    life:0, max:life,
+    size,
+    color,
+    drag:rand(1.2,2.6)
+  });
+}
+function spawnBurst(x, y, color = 'gold', n = 12, power = 1){
+  const count = REDUCED ? Math.ceil(n * .35) : n;
+  for (let i = 0; i < count; i++){
+    const a = rand(0, TAU);
+    const sp = rand(18, 95) * power;
+    spawnParticle(x, y, color, Math.cos(a)*sp, Math.sin(a)*sp, rand(.45,1.35), rand(.55,1.9));
+  }
+}
+function updateParticles(dt){
+  for (let i = particles.length - 1; i >= 0; i--){
+    const p = particles[i];
+    p.life += dt;
+    if (p.life >= p.max){ particles.splice(i,1); continue; }
+    const f = Math.max(0, 1 - p.drag * dt);
+    p.vx *= f; p.vy *= f;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  for (let i = pendingBursts.length - 1; i >= 0; i--){
+    const b = pendingBursts[i];
+    if (now >= b.at){
+      if (b.big){
+        for (let k = 0; k < 3; k++){
+          const a = rand(0,TAU), r = rand(0, stage.s*.18);
+          spawnBurst(stage.cx + Math.cos(a)*r, stage.cy + Math.sin(a)*r, 'gold', 10, 1.4);
+        }
+      } else if (b.n){
+        spawnBurst(b.x, b.y, b.color, b.n, b.power);
+      }
+      pendingBursts.splice(i,1);
+    }
+  }
+}
+
+/* ============================================================
+   render — background
+   ============================================================ */
+function drawBackground(){
+  bx.clearRect(0,0,W,H);
+  const base = bx.createRadialGradient(W*.5, H*.46, 0, W*.5, H*.5, Math.max(W,H)*.78);
+  base.addColorStop(0, '#0b1122');
+  base.addColorStop(.48, '#070b16');
+  base.addColorStop(1, '#04060c');
+  bx.fillStyle = base;
+  bx.fillRect(0,0,W,H);
+
+  if (nebulaCanvas){
+    bx.save();
+    bx.globalAlpha = .88;
+    bx.globalCompositeOperation = 'lighter';
+    const ox = -W*.03 + pointer.smx * -10;
+    const oy = -H*.03 + pointer.smy * -8;
+    bx.drawImage(nebulaCanvas, ox, oy, W*1.06, H*1.06);
+    bx.restore();
+  }
+
+  // a low ember at the horizon, to keep the night from turning grey
+  const warm = bx.createRadialGradient(W*.5, H*1.03, 0, W*.5, H*1.03, H*.62);
+  warm.addColorStop(0, 'rgba(100,55,43,.10)');
+  warm.addColorStop(.45, 'rgba(74,42,46,.045)');
+  warm.addColorStop(1, 'rgba(60,35,40,0)');
+  bx.fillStyle = warm;
+  bx.fillRect(0,0,W,H);
+
+  if (state === 'ending'){
+    const glow = bx.createRadialGradient(W/2,H*.5,0,W/2,H*.5,Math.min(W,H)*.43);
+    glow.addColorStop(0, 'rgba(216,179,123,.060)');
+    glow.addColorStop(.55, 'rgba(216,179,123,.020)');
+    glow.addColorStop(1, 'rgba(216,179,123,0)');
+    bx.fillStyle = glow;
+    bx.fillRect(0,0,W,H);
+  }
+
+  drawAstrolabe();
+  drawBgStars();
+  drawDust();
+  drawShooting();
+  if (state === 'ending') drawEndingRing();
+  drawArchives();
+}
+
+function drawAstrolabe(){
+  if (state === 'ending') return;
+  const A = state === 'intro' ? .55 : 1;
+  bx.save();
+  bx.translate(stage.cx, stage.cy);
+  const R = Math.max(stage.w, stage.h) * .60;
+  bx.strokeStyle = `rgba(216,179,123,${.043 * A})`;
+  bx.lineWidth = .6;
+  bx.beginPath(); bx.arc(0,0,R,0,TAU); bx.stroke();
+  bx.beginPath(); bx.arc(0,0,R*.735,0,TAU); bx.stroke();
+  bx.strokeStyle = `rgba(216,179,123,${.055 * A})`;
+  for (let i = 0; i < 48; i++){
+    const a = i / 48 * TAU + now * .002;
+    const long = i % 6 === 0;
+    const r1 = R * (long ? .985 : .993);
+    const r2 = R * 1.006;
+    bx.beginPath();
+    bx.moveTo(Math.cos(a)*r1, Math.sin(a)*r1);
+    bx.lineTo(Math.cos(a)*r2, Math.sin(a)*r2);
+    bx.stroke();
+  }
+  bx.restore();
+}
+
+function drawBgStars(){
+  bx.save();
+  bx.globalCompositeOperation = 'lighter';
+  const px = pointer.smx * 15, py = pointer.smy * 11;
+  const stageFocusIn = stage.s * .30;
+  const stageFocusOut = stage.s * .55;
+  for (const s of bgStars){
+    const tw = .62 + .38 * Math.sin(now * s.sp + s.p);
+    let a = s.a * tw;
+    if (a <= .01) continue;
+    const x = s.x + px * s.z, y = s.y + py * s.z;
+    // keep the observed field clear: background stars fade near the stage
+    const dStage = Math.hypot(x - stage.cx, y - stage.cy);
+    const focus = easeInOutCubic(clamp((dStage - stageFocusIn) / Math.max(1, stageFocusOut - stageFocusIn), 0, 1));
+    a *= lerp(.50, 1, focus);
+    const sprite = s.tint === 'gold' ? SPR.gold : s.tint === 'blue' ? SPR.blue : SPR.ivory;
+    const r = s.r * 8.5;
+    bx.globalAlpha = a;
+    bx.drawImage(sprite, x - r, y - r, r*2, r*2);
+    if (s.r > .85){
+      bx.globalAlpha = a * .9;
+      bx.fillStyle = '#fff6e6';
+      bx.beginPath(); bx.arc(x, y, Math.max(.45, s.r*.42), 0, TAU); bx.fill();
+    }
+    if (s.cross){
+      bx.globalAlpha = a * .28;
+      bx.strokeStyle = 'rgba(255,240,214,1)';
+      bx.lineWidth = .7;
+      const L = 5 + s.r * 5;
+      bx.beginPath();
+      bx.moveTo(x-L,y); bx.lineTo(x+L,y);
+      bx.moveTo(x,y-L); bx.lineTo(x,y+L);
+      bx.stroke();
+    }
+  }
+  bx.restore();
+}
+
+function drawDust(){
+  if (!dust.length) return;
+  bx.save();
+  bx.globalCompositeOperation = 'lighter';
+  for (const d of dust){
+    const tw = .55 + .45 * Math.sin(now * d.sp + d.p);
+    bx.globalAlpha = d.a * tw;
+    const r = d.r * 6;
+    bx.drawImage(SPR.ivory, d.x - r, d.y - r, r*2, r*2);
+  }
+  bx.restore();
+}
+
+function spawnShooting(){
+  const fromLeft = Math.random() < .5;
+  const x = fromLeft ? rand(-.1,.2)*W : rand(.8,1.1)*W;
+  const y = rand(.02,.22)*H;
+  const dir = fromLeft ? 1 : -1;
+  shooting.push({
+    x, y,
+    vx: dir * rand(260, 440),
+    vy: rand(100, 190),
+    life:0, max:rand(.8,1.35),
+    len:rand(80,150)
+  });
+}
+function updateShooting(dt){
+  if (!REDUCED && now > nextShooting){
+    spawnShooting();
+    nextShooting = now + rand(14, 30);
+  }
+  for (let i = shooting.length - 1; i >= 0; i--){
+    const s = shooting[i];
+    s.life += dt;
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    if (s.life > s.max) shooting.splice(i,1);
+  }
+}
+function drawShooting(){
+  if (!shooting.length) return;
+  bx.save();
+  bx.globalCompositeOperation = 'lighter';
+  for (const s of shooting){
+    const p = s.life / s.max;
+    const a = Math.sin(p * Math.PI) * .55;
+    const nx = s.vx, ny = s.vy;
+    const l = Math.hypot(nx,ny) || 1;
+    const ex = s.x - nx/l*s.len, ey = s.y - ny/l*s.len;
+    const g = bx.createLinearGradient(s.x,s.y,ex,ey);
+    g.addColorStop(0, `rgba(255,244,220,${a})`);
+    g.addColorStop(.25, `rgba(255,220,170,${a*.35})`);
+    g.addColorStop(1, 'rgba(255,220,170,0)');
+    bx.strokeStyle = g; bx.lineWidth = 1;
+    bx.beginPath(); bx.moveTo(s.x,s.y); bx.lineTo(ex,ey); bx.stroke();
+    bx.globalAlpha = a;
+    bx.drawImage(SPR.ivory, s.x-10, s.y-10, 20, 20);
+  }
+  bx.restore();
+}
+
+/* ---------- the finished chart, carried up into the sky ---------- */
+function drawArchiveFlight(){
+  const f = archiveFlight;
+  if (!f || state === 'ending' || state === 'intro') return;
+  if (now < f.t0) return;
+  if (now > f.t0 + f.dur + .55){ archiveFlight = null; return; }
+  const p = clamp((now - f.t0) / f.dur, 0, 1);
+  const e = easeInOutCubic(p);
+  const sx = W/2 + (f.x0 - W/2) * view.zoom;
+  const sy = H/2 + view.dy + (f.y0 - H/2) * view.zoom;
+  const ex = f.x1, ey = f.y1;
+  const bow = Math.min(150, Math.abs(ex-sx)*.2 + 42);
+  const cx = (sx+ex)/2;
+  const cy = Math.min(sy,ey) - bow;
+  const pt = t => {
+    const u = 1-t;
+    return {
+      x: u*u*sx + 2*u*t*cx + t*t*ex,
+      y: u*u*sy + 2*u*t*cy + t*t*ey
+    };
+  };
+  const head = pt(e);
+  fx.save();
+  fx.globalCompositeOperation = 'lighter';
+  // the errand of light
+  fx.globalAlpha = .24;
+  fx.strokeStyle = 'rgba(240,211,160,.9)';
+  fx.lineWidth = .8;
+  fx.setLineDash([2,8]);
+  fx.lineDashOffset = -now * 22;
+  fx.beginPath(); fx.moveTo(sx,sy); fx.quadraticCurveTo(cx,cy,ex,ey); fx.stroke();
+  fx.setLineDash([]);
+  // a short comet-tail
+  const tailT = Math.max(0, e - .13);
+  const tail = pt(tailT);
+  const grad = fx.createLinearGradient(tail.x,tail.y,head.x,head.y);
+  grad.addColorStop(0,'rgba(255,238,200,0)');
+  grad.addColorStop(.55,'rgba(255,224,170,.30)');
+  grad.addColorStop(1,'rgba(255,252,240,.85)');
+  fx.globalAlpha = 1;
+  fx.strokeStyle = grad;
+  fx.lineWidth = 1.7;
+  fx.beginPath(); fx.moveTo(tail.x,tail.y); fx.lineTo(head.x,head.y); fx.stroke();
+  const fade = p > .9 ? (1-p)/.1 : 1;
+  fx.globalAlpha = .9 * clamp(fade,0,1);
+  const r = 24 + (1-p)*12;
+  fx.drawImage(SPR.gold, head.x-r, head.y-r, r*2, r*2);
+  fx.restore();
+  if (p >= 1 && now > f.t0 + f.dur + .45) archiveFlight = null;
+}
+
+/* ---------- archives ---------- */
+function getSlot(i){
+  const desktop = [
+    [.115,.275,-.34],
+    [.885,.255,.28],
+    [.078,.520,.16],
+    [.922,.535,-.22],
+    [.165,.800,-.10],
+    [.835,.810,.24]
+  ];
+  const mobile = [
+    [.12,.175,-.30],
+    [.88,.175,.30],
+    [.065,.395,.18],
+    [.935,.395,-.18],
+    [.13,.865,-.10],
+    [.87,.865,.22]
+  ];
+  const s = stage.mobile ? mobile : desktop;
+  return s[i] || s[s.length-1];
+}
+function endingRx(){ return stage.mobile ? W*.435 : Math.min(W*.325, 520); }
+function endingRy(){ return stage.mobile ? H*.275 : Math.min(H*.305, 290); }
+function drawArchives(){
+  if (!archives.length) return;
+  if (state === 'intro') return;
+  const endingP = state === 'ending'
+    ? easeInOutCubic(clamp((now - endingT0) / 2.6, 0, 1)) : 0;
+  const sizeBase = Math.min(W,H) * (stage.mobile ? .095 : .118);
+  for (const entry of archives){
+    const slot = getSlot(entry.level);
+    let x = slot[0]*W, y = slot[1]*H, rot = slot[2];
+    if (state === 'ending'){
+      const a = -Math.PI/2 + entry.level * (TAU/6);
+      const tx = W/2 + Math.cos(a) * endingRx();
+      const ty = H*.5 + Math.sin(a) * endingRy();
+      x = lerp(x,tx,endingP); y = lerp(y,ty,endingP);
+      rot = lerp(rot, a + Math.PI/2, endingP);
+    }
+    const appear = easeOutCubic(clamp((now - entry.t) / 1.5, 0, 1));
+    if (appear <= 0) continue;
+    const alpha = (state === 'ending' ? 1 : .28) * appear;
+    const size = sizeBase * (state === 'ending' ? lerp(.84, 1.04, endingP) : 1);
+    drawMini(entry, x, y, size, rot, alpha);
+  }
+}
+function drawMini(entry, x, y, size, rot, alpha){
+  const pts = entry.pts;
+  if (!pts || pts.length < 2) return;
+  let minx = 9, maxx = -9, miny = 9, maxy = -9;
+  for (const [px,py] of pts){
+    if (px < minx) minx = px; if (px > maxx) maxx = px;
+    if (py < miny) miny = py; if (py > maxy) maxy = py;
+  }
+  const bw = Math.max(maxx-minx, .0001), bh = Math.max(maxy-miny, .0001);
+  const scale = size / Math.max(bw,bh);
+  const cx = (minx+maxx)/2, cy = (miny+maxy)/2;
+  bx.save();
+  bx.translate(x,y);
+  bx.rotate(rot);
+  // soft aura
+  bx.globalCompositeOperation = 'lighter';
+  const aura = bx.createRadialGradient(0,0,0,0,0,size*.78);
+  aura.addColorStop(0, `rgba(216,179,123,${.085*alpha})`);
+  aura.addColorStop(1, 'rgba(216,179,123,0)');
+  bx.fillStyle = aura;
+  bx.beginPath(); bx.arc(0,0,size*.78,0,TAU); bx.fill();
+  bx.scale(scale, scale);
+  bx.translate(-cx, -cy);
+  bx.globalCompositeOperation = 'source-over';
+  bx.strokeStyle = `rgba(224,190,132,${.62*alpha})`;
+  bx.lineWidth = 1.05 / scale;
+  bx.lineJoin = 'round'; bx.lineCap = 'round';
+  bx.beginPath();
+  bx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) bx.lineTo(pts[i][0], pts[i][1]);
+  bx.stroke();
+  bx.fillStyle = `rgba(255,242,216,${.92*alpha})`;
+  for (const [px,py] of pts){
+    bx.beginPath(); bx.arc(px, py, 1.15/scale, 0, TAU); bx.fill();
+  }
+  bx.restore();
+}
+
+function drawEndingRing(){
+  const prog = easeInOutCubic(clamp((now - endingT0) / 2.6, 0, 1));
+  const rx = endingRx(), ry = endingRy();
+  bx.save();
+  bx.translate(W/2, H*.5);
+  bx.strokeStyle = 'rgba(216,179,123,.12)';
+  bx.lineWidth = .8;
+  bx.beginPath(); bx.ellipse(0,0,rx,ry,0,0,TAU); bx.stroke();
+  // ticks where the six woven charts come to rest
+  for (let i = 0; i < 6; i++){
+    const a = -Math.PI/2 + i*TAU/6;
+    bx.strokeStyle = 'rgba(216,179,123,.22)';
+    bx.beginPath();
+    bx.moveTo(Math.cos(a)*(rx-6), Math.sin(a)*(ry-6));
+    bx.lineTo(Math.cos(a)*(rx+6), Math.sin(a)*(ry+6));
+    bx.stroke();
+  }
+  if (prog > 0){
+    bx.strokeStyle = 'rgba(232,196,138,.34)';
+    bx.lineWidth = 1.0;
+    bx.shadowColor = 'rgba(240,211,160,.55)';
+    bx.shadowBlur = 9;
+    bx.beginPath();
+    bx.ellipse(0,0,rx,ry,0,-Math.PI/2,-Math.PI/2 + TAU*prog);
+    bx.stroke();
+    const a = -Math.PI/2 + TAU*prog;
+    const hx = Math.cos(a)*rx, hy = Math.sin(a)*ry;
+    bx.shadowBlur = 18;
+    bx.globalAlpha = .8;
+    bx.drawImage(SPR.gold, hx-16, hy-16, 32, 32);
+  }
+  bx.restore();
+}
+
+/* ============================================================
+   render — stars, thread, particles
+   ============================================================ */
+function applyView(ctx){
+  ctx.translate(W/2, H/2 + view.dy);
+  ctx.scale(view.zoom, view.zoom);
+  ctx.translate(-W/2, -H/2);
+}
+
+function drawIntroRing(){
+  if (introRingAlpha <= .004) return;
+  const a = introRingAlpha;
+  const cx = W/2;
+  const cy = H*.455;
+  const R = Math.min(W,H) * (stage.mobile ? .37 : .315);
+  fx.save();
+  fx.globalAlpha = a;
+  fx.translate(cx,cy);
+  fx.globalCompositeOperation = 'lighter';
+  fx.strokeStyle = 'rgba(216,179,123,.115)';
+  fx.lineWidth = .8;
+  fx.beginPath(); fx.arc(0,0,R,0,TAU); fx.stroke();
+  fx.strokeStyle = 'rgba(239,230,212,.040)';
+  fx.beginPath(); fx.arc(0,0,R*.76,0,TAU); fx.stroke();
+  // slow bright arc
+  const a0 = now * .055 - .7;
+  fx.strokeStyle = 'rgba(240,211,160,.34)';
+  fx.lineWidth = 1.1;
+  fx.shadowColor = 'rgba(240,211,160,.65)';
+  fx.shadowBlur = 12;
+  fx.beginPath(); fx.arc(0,0,R,a0,a0+1.05); fx.stroke();
+  fx.shadowBlur = 0;
+  // quiet stars on the ring
+  for (let i = 0; i < 12; i++){
+    const ang = i/12*TAU + now*.012;
+    const rr = i % 4 === 0 ? R : R*.999;
+    const x = Math.cos(ang)*rr, y = Math.sin(ang)*rr;
+    const tw = .45 + .55*Math.sin(now*.8 + i*1.7);
+    fx.globalAlpha = a * (.16 + tw*.20);
+    fx.drawImage(SPR.ivory, x-7, y-7, 14, 14);
+  }
+  // head star
+  const hx = Math.cos(a0+1.05)*R, hy = Math.sin(a0+1.05)*R;
+  fx.globalAlpha = a * .75;
+  fx.drawImage(SPR.gold, hx-16, hy-16, 32, 32);
+  fx.restore();
+}
+
+function drawGame(){
+  fx.save();
+  applyView(fx);
+  drawCompletedAura();
+  drawHintLine();
+  drawThread();
+  drawStars();
+  drawParticles();
+  drawCompletion();
+  fx.restore();
+  if (flash > .01){
+    fx.save();
+    fx.globalCompositeOperation = 'lighter';
+    const g = fx.createRadialGradient(W/2,H*.46,0,W/2,H*.46,Math.max(W,H)*.6);
+    g.addColorStop(0, `rgba(255,224,170,${.10*flash})`);
+    g.addColorStop(.5, `rgba(216,179,123,${.035*flash})`);
+    g.addColorStop(1, 'rgba(216,179,123,0)');
+    fx.fillStyle = g; fx.fillRect(0,0,W,H);
+    fx.restore();
+  }
+}
+
+function drawCompletedAura(){
+  if (state !== 'completed' || path.length < 2) return;
+  let minx = W, maxx = 0, miny = H, maxy = 0;
+  for (const i of path){
+    const s = stars[i];
+    if (s.x < minx) minx = s.x; if (s.x > maxx) maxx = s.x;
+    if (s.y < miny) miny = s.y; if (s.y > maxy) maxy = s.y;
+  }
+  const cx = (minx+maxx)/2, cy = (miny+maxy)/2;
+  const R = Math.max(maxx-minx, maxy-miny) * .72 + 40;
+  fx.save();
+  fx.globalCompositeOperation = 'lighter';
+  const g = fx.createRadialGradient(cx,cy,0,cx,cy,R);
+  g.addColorStop(0,'rgba(255,218,158,.055)');
+  g.addColorStop(.55,'rgba(216,179,123,.018)');
+  g.addColorStop(1,'rgba(216,179,123,0)');
+  fx.fillStyle = g;
+  fx.beginPath(); fx.arc(cx,cy,R,0,TAU); fx.fill();
+  fx.restore();
+}
+
+function drawHintLine(){
+  if (hintIndex < 0 || state !== 'playing' || !path.length) return;
+  if (now > hintUntil) return;
+  const a = stars[path[path.length-1]], b = stars[hintIndex];
+  if (!a || !b) return;
+  const fade = clamp((hintUntil - now) / 1.2, 0, 1);
+  fx.save();
+  fx.globalAlpha = levelAlpha * .34 * fade;
+  fx.strokeStyle = 'rgba(240,211,160,.9)';
+  fx.lineWidth = .8;
+  fx.setLineDash([1.5,7]);
+  fx.lineDashOffset = -now * 24;
+  fx.beginPath(); fx.moveTo(a.x,a.y); fx.lineTo(b.x,b.y); fx.stroke();
+  fx.restore();
+}
+
+function drawThread(){
+  if (!path.length) { drawPreview(); return; }
+  const k = clamp(stage.s / 650, .72, 1.35);
+  const pts = [];
+  for (let i = 0; i < path.length; i++){
+    const s = stars[path[i]];
+    pts.push({x:s.x, y:s.y});
+  }
+  // segment draw-in
+  const drawPts = [pts[0]];
+  for (let i = 1; i < pts.length; i++){
+    const birth = pathBirths[i-1];
+    const p = birth == null ? 1 : easeOutCubic(clamp((now - birth) / .20, 0, 1));
+    if (p >= 1) drawPts.push(pts[i]);
+    else {
+      drawPts.push({ x:lerp(pts[i-1].x, pts[i].x, p), y:lerp(pts[i-1].y, pts[i].y, p) });
+      break;
+    }
+  }
+  const boost = state === 'completed' ? 1.25 : 1;
+  fx.save();
+  fx.lineCap = 'round'; fx.lineJoin = 'round';
+  fx.globalCompositeOperation = 'lighter';
+  fx.globalAlpha = levelAlpha;
+
+  const trace = (width, style, blur, blurColor) => {
+    fx.beginPath();
+    fx.moveTo(drawPts[0].x, drawPts[0].y);
+    for (let i = 1; i < drawPts.length; i++) fx.lineTo(drawPts[i].x, drawPts[i].y);
+    fx.lineWidth = width;
+    fx.strokeStyle = style;
+    if (blur){ fx.shadowBlur = blur; fx.shadowColor = blurColor; }
+    fx.stroke();
+    fx.shadowBlur = 0;
+  };
+  trace(11*k*boost, 'rgba(206,156,84,.13)', 26, 'rgba(240,190,110,.55)');
+  trace(4.2*k*boost, 'rgba(240,198,128,.20)', 12, 'rgba(240,190,110,.4)');
+  trace(1.65*k*boost, 'rgba(255,228,182,.62)', 0, '');
+  trace(.75*k*boost, 'rgba(255,249,236,.95)', 0, '');
+
+  // a living shimmer travelling along the thread
+  if (pts.length > 1){
+    const total = polyLength(pts);
+    if (total > 4){
+      const speed = state === 'completed' ? .085 : .035;
+      const p = (now * speed) % 1;
+      const head = p * total;
+      const tail = Math.max(0, head - 90*k);
+      const hp = pointOnPoly(pts, head);
+      const tp = pointOnPoly(pts, tail);
+      const g = fx.createLinearGradient(tp.x,tp.y,hp.x,hp.y);
+      g.addColorStop(0,'rgba(255,244,218,0)');
+      g.addColorStop(.75,`rgba(255,244,218,${.18*boost})`);
+      g.addColorStop(1,`rgba(255,252,244,${.55*boost})`);
+      fx.strokeStyle = g;
+      fx.lineWidth = 1.5*k;
+      fx.beginPath(); fx.moveTo(tp.x,tp.y); fx.lineTo(hp.x,hp.y); fx.stroke();
+      fx.globalAlpha = levelAlpha * .55;
+      fx.drawImage(SPR.ivory, hp.x-9, hp.y-9, 18, 18);
+    }
+  }
+  fx.restore();
+  drawPreview();
+}
+
+function drawPreview(){
+  if (state !== 'playing' || !dragging || !path.length) return;
+  const last = stars[path[path.length-1]];
+  const hovered = hoverIndex >= 0 ? stars[hoverIndex] : null;
+  const targetValid = hovered && !hovered.visited && hovered.i !== last.i;
+  let endX = pointer.x, endY = pointer.y;
+  let crossing = false;
+  if (targetValid){
+    endX = hovered.x; endY = hovered.y;
+    for (let k = 0; k < path.length - 2; k++){
+      if (segInt(last.pt, hovered.pt, stars[path[k]].pt, stars[path[k+1]].pt)){ crossing = true; break; }
+    }
+  }
+  if (Math.hypot(endX-last.x, endY-last.y) < 2 && !targetValid) return;
+  const k = clamp(stage.s / 650, .72, 1.35);
+  fx.save();
+  fx.globalAlpha = levelAlpha;
+  fx.lineCap = 'round';
+  if (crossing){
+    fx.strokeStyle = 'rgba(214,105,82,.62)';
+    fx.lineWidth = 1.1*k;
+    fx.setLineDash([2,6]);
+  } else {
+    const g = fx.createLinearGradient(last.x,last.y,endX,endY);
+    g.addColorStop(0,'rgba(255,238,204,.85)');
+    g.addColorStop(.55,'rgba(240,211,160,.42)');
+    g.addColorStop(1, targetValid ? 'rgba(255,248,232,.85)' : 'rgba(240,211,160,.14)');
+    fx.strokeStyle = g;
+    fx.lineWidth = (targetValid ? 2.0 : 1.5) * k;
+    fx.setLineDash(targetValid ? [] : [2.5,6]);
+    fx.lineDashOffset = -now*28;
+    fx.shadowColor = 'rgba(240,190,110,.5)';
+    fx.shadowBlur = targetValid ? 10 : 6;
+  }
+  fx.beginPath(); fx.moveTo(last.x,last.y); fx.lineTo(endX,endY); fx.stroke();
+  fx.shadowBlur = 0;
+  fx.setLineDash([]);
+  if (targetValid){
+    fx.globalCompositeOperation = 'lighter';
+    fx.globalAlpha = levelAlpha * (crossing ? .3 : .6);
+    fx.drawImage(crossing ? SPR.rose : SPR.gold, endX-22, endY-22, 44, 44);
+  }
+  // cursor bead
+  if (!targetValid){
+    fx.globalCompositeOperation = 'lighter';
+    fx.globalAlpha = levelAlpha * .55;
+    fx.drawImage(SPR.ivory, pointer.x-11, pointer.y-11, 22, 22);
+  }
+  fx.restore();
+}
+
+function polyLength(pts){
+  let t = 0;
+  for (let i = 1; i < pts.length; i++) t += Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y);
+  return t;
+}
+function pointOnPoly(pts, d){
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++){
+    const seg = Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y);
+    if (acc + seg >= d || i === pts.length-1){
+      const t = seg > 0 ? clamp((d-acc)/seg, 0, 1) : 0;
+      return { x:lerp(pts[i-1].x,pts[i].x,t), y:lerp(pts[i-1].y,pts[i].y,t) };
+    }
+    acc += seg;
+  }
+  return pts[pts.length-1];
+}
+
+function drawStars(){
+  fx.save();
+  fx.globalCompositeOperation = 'lighter';
+  for (const s of stars){
+    const entry = easeOutCubic(clamp((now - s.birth) / .9, 0, 1));
+    if (entry <= .003) continue;
+    const hoverTarget = (hoverIndex === s.i && !s.visited && state === 'playing') ? 1 : 0;
+    s.hover += (hoverTarget - s.hover) * .22;
+    const dead = deadEnd && path.length && path[path.length-1] === s.i;
+    const tw = 1 + .045 * Math.sin(now * 1.45 + s.phase);
+    const rad = s.r * (1 + .30 * s.hover) * tw * (.78 + .22 * entry);
+    const col = s.visited ? 'gold' : 'ivory';
+    const sprite = s.visited ? SPR.gold : SPR.ivory;
+
+    // halo
+    fx.globalAlpha = levelAlpha * entry * (s.visited ? .82 : .58) * (1 + .18*s.hover);
+    const hr = rad * (s.major ? 13 : 10) * (1 + .18*s.hover);
+    fx.drawImage(sprite, s.x-hr, s.y-hr, hr*2, hr*2);
+
+    // diffraction crosses for the few bright ones
+    if (s.major){
+      const L = rad * 9 * (1 + .1*s.hover);
+      fx.globalAlpha = levelAlpha * entry * .28;
+      fx.strokeStyle = s.visited ? 'rgba(255,226,174,1)' : 'rgba(255,246,226,1)';
+      fx.lineWidth = .65;
+      fx.beginPath();
+      fx.moveTo(s.x-L, s.y); fx.lineTo(s.x+L, s.y);
+      fx.moveTo(s.x, s.y-L); fx.lineTo(s.x, s.y+L);
+      fx.stroke();
+      fx.globalAlpha = levelAlpha * entry * .16;
+      fx.beginPath();
+      const d = L*.38;
+      fx.moveTo(s.x-d, s.y-d); fx.lineTo(s.x+d, s.y+d);
+      fx.moveTo(s.x-d, s.y+d); fx.lineTo(s.x+d, s.y-d);
+      fx.stroke();
+    }
+
+    // core
+    fx.globalAlpha = levelAlpha * entry;
+    fx.fillStyle = s.visited ? 'rgba(255,244,219,1)' : 'rgba(255,248,236,1)';
+    fx.beginPath(); fx.arc(s.x, s.y, rad*.72, 0, TAU); fx.fill();
+    if (s.visited){
+      fx.globalAlpha = levelAlpha * entry * .7;
+      fx.strokeStyle = 'rgba(240,211,160,.55)';
+      fx.lineWidth = .7;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 4.5, 0, TAU); fx.stroke();
+    }
+
+    // hover ring
+    if (s.hover > .02 && !s.visited){
+      fx.globalAlpha = levelAlpha * s.hover * .52;
+      fx.strokeStyle = 'rgba(240,211,160,.85)';
+      fx.lineWidth = .8;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 10 + 3*Math.sin(now*3), 0, TAU); fx.stroke();
+    }
+
+    // connection pulse
+    if (s.pulse > .01){
+      const p = 1 - s.pulse;
+      fx.globalAlpha = levelAlpha * s.pulse * .55;
+      fx.strokeStyle = 'rgba(240,211,160,.9)';
+      fx.lineWidth = .8;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 6 + p * stage.s * .055, 0, TAU); fx.stroke();
+    }
+
+    // hint pulse / suggestion
+    if (hintIndex === s.i && now < hintUntil && (state === 'playing' || state === 'completed')){
+      const ph = ((now - hintSince) % 1.5) / 1.5;
+      fx.globalAlpha = levelAlpha * (1 - ph) * .62;
+      fx.strokeStyle = 'rgba(240,211,160,.95)';
+      fx.lineWidth = .9;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 8 + ph * 26, 0, TAU); fx.stroke();
+      fx.globalAlpha = levelAlpha * (1 - ph) * .20;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 8 + ph * 42, 0, TAU); fx.stroke();
+      fx.globalAlpha = levelAlpha * .65 * clamp((hintUntil - now)/1.2,0,1);
+      fx.setLineDash([2,5]); fx.lineDashOffset = -now*18;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 11, 0, TAU); fx.stroke();
+      fx.setLineDash([]);
+    } else if (!path.length && state === 'playing' && s.i === level.order[0] && now - lastAction > 1.1){
+      const ph = (now % 2.6) / 2.6;
+      fx.globalAlpha = levelAlpha * (1 - ph) * .42;
+      fx.strokeStyle = 'rgba(240,211,160,.85)';
+      fx.lineWidth = .7;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 8 + ph * 20, 0, TAU); fx.stroke();
+      fx.globalAlpha = levelAlpha * .38;
+      fx.setLineDash([2,5]); fx.lineDashOffset = -now*16;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 10, 0, TAU); fx.stroke();
+      fx.setLineDash([]);
+    }
+
+    // dead end
+    if (dead){
+      fx.globalAlpha = levelAlpha * .35;
+      fx.strokeStyle = 'rgba(214,100,80,.85)';
+      fx.lineWidth = .8;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 8, 0, TAU); fx.stroke();
+    }
+    // reject flash
+    if (s.reject > 0){
+      fx.globalAlpha = levelAlpha * s.reject * .7;
+      fx.strokeStyle = 'rgba(226,110,86,.95)';
+      fx.lineWidth = 1;
+      fx.beginPath(); fx.arc(s.x, s.y, rad + 12 + (1-s.reject)*10, 0, TAU); fx.stroke();
+    }
+  }
+  fx.restore();
+}
+
+function drawParticles(){
+  if (!particles.length) return;
+  fx.save();
+  fx.globalCompositeOperation = 'lighter';
+  const k = clamp(stage.s/650, .7, 1.35);
+  for (const p of particles){
+    const life = 1 - p.life / p.max;
+    if (life <= 0) continue;
+    const sprite = p.color === 'gold' ? SPR.gold : p.color === 'rose' ? SPR.rose : SPR.ivory;
+    const r = p.size * 4.2 * k;
+    fx.globalAlpha = levelAlpha * Math.pow(life, .8) * .9;
+    fx.drawImage(sprite, p.x-r, p.y-r, r*2, r*2);
+  }
+  fx.restore();
+}
+
+function drawCompletion(){
+  if (!completion) return;
+  const p = clamp((now - completion.t0) / completion.dur, 0, 1);
+  if (p <= 0 || p >= 1) return;
+  const pts = path.map(i => ({x:stars[i].x, y:stars[i].y}));
+  if (pts.length < 2) return;
+  const total = polyLength(pts);
+  const e = easeInOutCubic(p);
+  const head = pointOnPoly(pts, total * e);
+  const tail = pointOnPoly(pts, Math.max(0, total * e - 130));
+  const g = fx.createLinearGradient(tail.x,tail.y,head.x,head.y);
+  g.addColorStop(0,'rgba(255,240,210,0)');
+  g.addColorStop(.6,'rgba(255,238,200,.42)');
+  g.addColorStop(1,'rgba(255,255,248,.95)');
+  fx.save();
+  fx.globalCompositeOperation = 'lighter';
+  fx.strokeStyle = g; fx.lineWidth = 2.4;
+  fx.beginPath(); fx.moveTo(tail.x,tail.y); fx.lineTo(head.x,head.y); fx.stroke();
+  const hr = 42 * (1 - .35*p);
+  fx.globalAlpha = .8;
+  fx.drawImage(SPR.gold, head.x-hr, head.y-hr, hr*2, hr*2);
+  fx.restore();
+}
+
+/* ============================================================
+   update
+   ============================================================ */
+function update(dt){
+  const t = now;
+  pointer.smx = lerp(pointer.smx, pointer.x / Math.max(1,W) - .5, Math.min(1, dt * 2.2));
+  pointer.smy = lerp(pointer.smy, pointer.y / Math.max(1,H) - .5, Math.min(1, dt * 2.2));
+  view.zoom = lerp(view.zoom, view.tz, Math.min(1, dt * 3.4));
+  view.dy = lerp(view.dy, view.tdy, Math.min(1, dt * 3.4));
+  levelAlpha = lerp(levelAlpha, levelAlphaTarget, Math.min(1, dt * 3.6));
+  if (levelAlpha < .002 && levelAlphaTarget === 0) levelAlpha = 0;
+  introRingAlpha = lerp(introRingAlpha, state === 'intro' ? 1 : 0, Math.min(1, dt * 2.2));
+  flash *= Math.exp(-dt * 2.4);
+
+  for (const s of stars){
+    if (s.pulse > 0) s.pulse = Math.max(0, s.pulse - dt * 1.15);
+    if (s.reject > 0) s.reject = Math.max(0, s.reject - dt * 1.8);
+    if (s.pulseAt && now >= s.pulseAt){ s.pulse = 1; s.pulseAt = 0; }
+  }
+  updateParticles(dt);
+  updateDust(dt);
+  updateShooting(dt);
+
+  if (state === 'playing'){
+    if (now > nextAutoHint && now - lastAction > 20 && !dragging){
+      pulseAutoHint();
+    }
+    if (dragging && pointer.down) {
+      // safety: if pointer is released outside the window
+      if (!pointer.inside) { dragging = false; }
+    }
+  }
+  if (state === 'completed' && autoAdvanceAt && now > autoAdvanceAt){
+    advance();
+  }
+  if (state === 'ending'){
+    endingProgress = easeInOutCubic(clamp((now - endingT0) / 2.6, 0, 1));
+  }
+  if (pointer.type !== 'touch' && pointer.inside){
+    updateCursor();
+  }
+}
+
+function updateDust(dt){
+  for (const d of dust){
+    d.x += (d.vx + Math.sin(now * .35 + d.p) * 1.6) * dt;
+    d.y += d.vy * dt;
+    if (d.y < -20) { d.y = H + 20; d.x = rand(0,W); }
+    if (d.x < -20) d.x = W + 20;
+    if (d.x > W + 20) d.x = -20;
+  }
+}
+
+/* ============================================================
+   frame
+   ============================================================ */
+function frame(t){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.05, Math.max(.001, (t - lastFrame) / 1000));
+  lastFrame = t;
+  now = t / 1000;
+  update(dt);
+  drawBackground();
+  fx.clearRect(0,0,W,H);
+  if (state === 'intro' || introRingAlpha > .004) drawIntroRing();
+  if (state !== 'intro' && (levelAlpha > .001 || state === 'completed')){
+    drawGame();
+  }
+  drawArchiveFlight();
+}
+
+/* ============================================================
+   wiring
+   ============================================================ */
+window.addEventListener('resize', () => {
+  clearTimeout(window.__rz);
+  window.__rz = setTimeout(resize, 90);
+});
+window.addEventListener('pointermove', onPointerMove, { passive:true });
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('pointercancel', onPointerCancel);
+window.addEventListener('pointerleave', () => { pointer.inside = false; cursorEl.classList.remove('show'); });
+window.addEventListener('blur', () => { dragging = false; pointer.down = false; });
+fg.addEventListener('pointerdown', onPointerDown);
+fg.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('keydown', e => {
+  if ((e.key === 'Enter' || e.key === ' ') && state === 'intro'){ e.preventDefault(); startGame(); return; }
+  if (e.key === 'Enter' && state === 'completed'){ e.preventDefault(); advance(); return; }
+  if (state !== 'playing') return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' || e.key === 'Backspace'){ e.preventDefault(); undoPath(); }
+  else if (k === 'r'){ restartLevel(); }
+  else if (k === 'h'){ requestHint(); }
+  else if (k === 'm'){ Sound.toggle(); }
+});
+document.addEventListener('visibilitychange', () => {
+  if (!Sound.ctx) return;
+  if (document.hidden){
+    try { Sound.ctx.suspend(); } catch(e){}
+  } else {
+    try { Sound.ctx.resume(); } catch(e){}
+  }
+});
+startBtn.addEventListener('click', startGame);
+againBtn.addEventListener('click', resetGame);
+hintBtn.addEventListener('click', requestHint);
+undoBtn.addEventListener('click', undoPath);
+restartBtn.addEventListener('click', restartLevel);
+soundBtn.addEventListener('click', () => Sound.toggle());
+
+/* init */
+resize();
+lastFrame = performance.now();
+requestAnimationFrame(frame);
+console.log('%c星织 · STARWEAVE','color:#d8b37b;font-size:13px;letter-spacing:.35em;');
+
+/* debug hooks (harmless; useful for stills & tests) */
+window.__starweave = {
+  start: () => startGame(),
+  load: i => {
+    introEl.classList.add('hide'); introEl.style.display = 'none';
+    loadLevel(clamp(i,0,LEVELS.length-1));
+    state = 'playing'; levelAlpha = 1; levelAlphaTarget = 1;
+    hudEl.classList.add('show'); footerEl.classList.add('show');
+  },
+  state: () => ({
+    state, levelIndex, path:[...path], starCount:stars.length,
+    deadEnd, alpha:levelAlpha,
+    stars:stars.map(s => ({ i:s.i, x:+s.x.toFixed(1), y:+s.y.toFixed(1), visited:s.visited }))
+  }),
+  setPath: arr => {
+    for (const s of stars){ s.visited = false; s.order = -1; }
+    path = []; pathBirths = [];
+    for (let k = 0; k < arr.length; k++){
+      const s = stars[arr[k]];
+      s.visited = true; s.order = k; s.pulse = k === arr.length-1 ? 1 : 0;
+      path.push(arr[k]);
+      if (k > 0) pathBirths.push(now - 1);
+    }
+    updateDots();
+    if (path.length && state === 'playing') setHint('继续 · 别回头');
+  },
+  finish: () => { if (state === 'playing' && path.length === stars.length) completePath(); },
+  advance: () => advance(),
+  archiveAll: () => {
+    archives = LEVELS.map((L, i) => ({
+      level:i,
+      pts:L.order.map(k => L.stars[k].slice()),
+      t:now - 5,
+      perfect:true
+    }));
+    state = 'playing';
+    startEnding();
+  },
+  stats: () => statsText(),
+  solve: () => findSolution(level.stars, path, 200000)
+};
+})();
