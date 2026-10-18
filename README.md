@@ -56,7 +56,7 @@
 
 ## 工程
 
-- `starweave.html` — 最终成品，自包含（HTML + CSS + JS + 生成式音频；除 GA4 统计脚本外无外部依赖）。
+- `starweave.html` — 最终成品，自包含（HTML + CSS + JS + 生成式音频；除 GA4 与 Cloudflare Web Analytics 统计脚本外无外部依赖）。
 - `src/shell.html` — 界面与样式。
 - `src/game.js` — 游戏逻辑、渲染、音频。
 - `src/build.py` — 将源文件合并为单文件成品：
@@ -65,22 +65,24 @@
 python3 src/build.py
 ```
 
-技术栈：原生 Canvas 2D、WebAudio、Pointer Events；无框架；游戏本体无网络请求，仅接入 GA4 统计脚本。
+技术栈：原生 Canvas 2D、WebAudio、Pointer Events；无框架；游戏本体无网络请求，仅接入 GA4 与 Cloudflare Web Analytics 统计脚本。
 
 ## 统计
 
-页面在 `<head>` 中接入 Google Analytics 4，Measurement ID：`G-6BP0J06GF1`。
+页面在 `<head>` 中接入 Google Analytics 4，Measurement ID：`G-6BP0J06GF1`；同时在 `</body>` 前接入 Cloudflare Web Analytics（无 cookie，作为页面访问与性能数据的补充）。
 
-自动记录 `page_view`，并发送以下游戏事件：
+GA4 自动记录 `page_view`，并发送以下游戏事件：
 
 - `game_start`
 - `constellation_complete`（关卡、星数、是否一气呵成）
 - `game_complete`（完成星图数、星辰数）
 - `replay`
 
-只发送以上事件与基础访问数据，不发送玩家的连线内容。如不需要统计，删除 `src/shell.html` 中的 gtag 代码并运行 `python3 src/build.py` 重新构建即可。
+只发送以上事件与基础访问数据，不发送玩家的连线内容。Cloudflare Web Analytics 目前不支持自定义事件，因此游戏事件仍由 GA4 记录；两者可以并存。
 
-> 提示：Google Analytics 在中国大陆网络下可能无法加载，但不影响游戏运行。如需国内可用的统计，可以另外接入 Cloudflare Web Analytics、Umami 或百度统计。
+如不需要统计，删除 `src/shell.html` 中的 gtag / Cloudflare beacon 代码并运行 `python3 src/build.py` 重新构建即可。若以后迁移到 Cloudflare Pages 并使用 Pages 的一键 Web Analytics，请删除手动 snippet，避免重复。
+
+> 提示：Google Analytics 在中国大陆网络下可能无法加载；Cloudflare beacon 是否可达也取决于网络。两者失败都不会影响游戏运行。
 
 ![完成一夜](preview/constellation.png)
 
