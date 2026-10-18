@@ -4,11 +4,13 @@
 
 一场关于星辰与连线的静默小游戏。六夜，六十五颗星，一根不回头的线。
 
+**在线试玩：[secondmax.github.io/STARWEAVE](https://secondmax.github.io/STARWEAVE/)**
+
 ![星织 · 封面](preview/title.png)
 
 ## 开始
 
-双击 `starweave.html`，用 Chrome 或 Safari 打开即可。单文件、无外部依赖、可离线运行。建议佩戴耳机。
+双击 `starweave.html`，用 Chrome 或 Safari 打开即可；也可以直接访问[在线试玩](https://secondmax.github.io/STARWEAVE/)。单文件、无外部依赖、可离线运行。建议佩戴耳机。
 
 ## 玩法
 
