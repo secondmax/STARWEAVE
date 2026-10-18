@@ -6,6 +6,14 @@
 <meta name="theme-color" content="#05070e">
 <meta name="description" content="星织 STARWEAVE —— 一场关于星辰与连线的静默游戏。以一根线穿过所有星辰，不回头，不交叠。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%2305070e'/%3E%3Cpath d='M32 10l4.2 17.8L54 32l-17.8 4.2L32 54l-4.2-17.8L10 32l17.8-4.2z' fill='%23d8b37b'/%3E%3C/svg%3E">
+<!-- Google tag (gtag.js) — 星织 / STARWEAVE 访问统计 -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-6BP0J06GF1"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-6BP0J06GF1');
+</script>
 <title>星织 · STARWEAVE</title>
 <style>
   :root{
@@ -614,6 +622,13 @@ function mulberry32(a){
   };
 }
 const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+
+/* Google Analytics 4 — never let tracking break the game */
+function trackEvent(name, params = {}){
+  try {
+    if (typeof window.gtag === 'function') window.gtag('event', name, params);
+  } catch (err) { /* analytics is optional */ }
+}
 
 /* ---------- the six nights ---------- */
 const LEVELS = [
@@ -1247,6 +1262,7 @@ function toast(msg){
    ============================================================ */
 function startGame(){
   if (state !== 'intro') return;
+  trackEvent('game_start');
   Sound.init();
   Sound.tick();
   state = 'transition';
@@ -1585,6 +1601,12 @@ function completePath(){
   hintIndex = -1;
   deadEnd = false;
   const perfect = !usedHint && !usedUndo && !usedRestart;
+  trackEvent('constellation_complete', {
+    level: level.zh,
+    level_index: levelIndex + 1,
+    perfect: perfect ? 1 : 0,
+    stars: stars.length
+  });
   const entry = addArchive(perfect);
   if (entry){
     let sx = 0, sy = 0;
@@ -1666,6 +1688,10 @@ function startEnding(){
   archiveFlight = null;
   view.tz = 1; view.tdy = 0;
   archives.forEach(a => { a.t = Math.min(a.t, now - 1); });
+  trackEvent('game_complete', {
+    levels: archives.length,
+    stars: archives.reduce((sum, a) => sum + a.pts.length, 0)
+  });
   Sound.finale();
   if (!endStats.textContent) endStats.textContent = statsText();
   const s = session;
@@ -1683,6 +1709,7 @@ function statsText(){
 }
 function resetGame(){
   if (state !== 'ending') return;
+  trackEvent('replay');
   endingEl.classList.remove('show');
   endSeal.classList.remove('show');
   archives = [];

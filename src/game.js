@@ -38,6 +38,13 @@ function mulberry32(a){
 }
 const midiToFreq = m => 440 * Math.pow(2, (m - 69) / 12);
 
+/* Google Analytics 4 — never let tracking break the game */
+function trackEvent(name, params = {}){
+  try {
+    if (typeof window.gtag === 'function') window.gtag('event', name, params);
+  } catch (err) { /* analytics is optional */ }
+}
+
 /* ---------- the six nights ---------- */
 const LEVELS = [
   {
@@ -670,6 +677,7 @@ function toast(msg){
    ============================================================ */
 function startGame(){
   if (state !== 'intro') return;
+  trackEvent('game_start');
   Sound.init();
   Sound.tick();
   state = 'transition';
@@ -1008,6 +1016,12 @@ function completePath(){
   hintIndex = -1;
   deadEnd = false;
   const perfect = !usedHint && !usedUndo && !usedRestart;
+  trackEvent('constellation_complete', {
+    level: level.zh,
+    level_index: levelIndex + 1,
+    perfect: perfect ? 1 : 0,
+    stars: stars.length
+  });
   const entry = addArchive(perfect);
   if (entry){
     let sx = 0, sy = 0;
@@ -1089,6 +1103,10 @@ function startEnding(){
   archiveFlight = null;
   view.tz = 1; view.tdy = 0;
   archives.forEach(a => { a.t = Math.min(a.t, now - 1); });
+  trackEvent('game_complete', {
+    levels: archives.length,
+    stars: archives.reduce((sum, a) => sum + a.pts.length, 0)
+  });
   Sound.finale();
   if (!endStats.textContent) endStats.textContent = statsText();
   const s = session;
@@ -1106,6 +1124,7 @@ function statsText(){
 }
 function resetGame(){
   if (state !== 'ending') return;
+  trackEvent('replay');
   endingEl.classList.remove('show');
   endSeal.classList.remove('show');
   archives = [];
